@@ -18,6 +18,14 @@ class Config:
     return_off_seconds: float
     stride: int
     mqtt: dict
+    room: dict
+    oak: dict
+    path: Path
+
+    @property
+    def empty_map_path(self) -> Path:
+        """Learned empty-room height map, stored next to config.yaml."""
+        return self.path.parent / self.room.get("empty_map", "empty_room.npz")
 
 
 def load(path: str | Path) -> Config:
@@ -31,6 +39,9 @@ def load(path: str | Path) -> Config:
         return_off_seconds=t.get("return_off_seconds", 5.0),
         stride=t.get("stride", 4),
         mqtt=raw.get("mqtt") or {},
+        room=raw.get("room") or {},
+        oak=raw.get("oak") or {},
+        path=Path(path),
     )
 
 

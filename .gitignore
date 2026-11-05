@@ -5,3 +5,4 @@ config.yaml
 *.png
 .venv/
 logs/
+empty_room.npz

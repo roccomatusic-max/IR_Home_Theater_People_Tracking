@@ -107,6 +107,12 @@ class SetupServer:
         self.config_path = config_path
         self.lock = lock or threading.RLock()  # shared with the main loop
         self.calibrate_requested = False
+        self.learn_requested = False
+        self.room_mapped = False
+        self.people: list[dict] = []
+        self.armed: list[str] = []
+        self.people_count = 0
+        self.room_occupied = False
         self.message = ""
         self.camera: dict = {}
         self.bounds: Bounds | None = None
@@ -139,6 +145,11 @@ class SetupServer:
                     self._send(404, b"not found", "text/plain")
 
             def do_POST(self):
+                if self.path == "/learn":
+                    with server.lock:
+                        server.learn_requested = True
+                        server.message = "Learning the empty room..."
+                    return self._send(200, json.dumps(server.state()).encode(), "application/json")
                 if self.path == "/calibrate":
                     with server.lock:
                         server.calibrate_requested = True
@@ -171,8 +182,25 @@ class SetupServer:
                 save_zones(self.config_path, zones)
                 log.info("saved %d zones to %s", len(zones), self.config_path)
 
-    def update(self, points: np.ndarray, with_image: bool, weights: np.ndarray | None = None) -> None:
+    def update(
+        self,
+        points: np.ndarray,
+        with_image: bool,
+        weights: np.ndarray | None = None,
+        tracks: list | None = None,
+        armed: list[str] | None = None,
+        people_count: int = 0,
+        room_occupied: bool = False,
+    ) -> None:
         with self.lock:
+            self.people = [
+                {"id": t.id, "x": round(t.x, 2), "y": round(t.y, 2), "vx": round(t.vx, 2), "vy": round(t.vy, 2),
+                 "standing": t.standing}
+                for t in (tracks or [])
+            ]
+            self.armed = list(armed or [])
+            self.people_count = people_count
+            self.room_occupied = room_occupied
             if self.bounds is None:
                 self.bounds = Bounds.around(points)
             self.counts = self.tracker.counts(points, weights)
@@ -191,6 +219,9 @@ class SetupServer:
                 "enabled": self.tracker.enabled,
                 "camera": self.camera,
                 "message": self.message,
+                "people": self.people,
+                "armed": self.armed,
+                "room": {"mapped": self.room_mapped, "count": self.people_count, "occupied": self.room_occupied},
             }
 
     def close(self) -> None:

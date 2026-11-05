@@ -55,6 +55,7 @@ class ZoneState:
     hits_in_a_row: int = 0
     last_seen: float = float("-inf")
     returning: bool = False  # someone is walking back toward the seats
+    armed_until: float = float("-inf")  # pre-armed: react on the first frame, any direction
     track: deque = field(default_factory=lambda: deque(maxlen=60))  # (time, centre y) while seen
 
 
@@ -73,9 +74,12 @@ class ZoneTracker:
     on_frames: int = 3
     off_seconds: float = 30.0
     return_off_seconds: float = 5.0
-    min_travel: float = 0.15
+    min_travel: float = 0.15  # m moved toward the exit (raw point cloud, when no tracks)
+    min_speed: float = 0.25  # m/s toward the exit (tracked people)
     track_seconds: float = 2.0
     enabled: bool = True
+    arm_distance: float = 1.2  # a standing person this close to a zone pre-arms it (m)
+    arm_seconds: float = 8.0  # how long a pre-arm lasts after they were last near it
     states: dict[str, ZoneState] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -98,6 +102,32 @@ class ZoneTracker:
                 self.states[name] = ZoneState()
         return changed
 
+    def prearm(self, people, now: float) -> list[str]:
+        """Arm zones next to anyone standing up outside the walkways.
+
+        Someone who stands up in the seats is about to walk out, so the zone
+        they're next to skips the usual multi-frame confirmation and the
+        direction check, and turns on the first frame they step into it.
+        People already in a walkway (e.g. walking back in) don't arm anything.
+        Returns the zones that are armed now.
+        """
+        armed = []
+        for zone in self.zones:
+            st = self.states[zone.name]
+            for p in people:
+                if not p.standing:
+                    continue
+                inside_any = any(z.x_min <= p.x <= z.x_max and z.y_min <= p.y <= z.y_max for z in self.zones)
+                if inside_any:
+                    continue
+                dx = max(zone.x_min - p.x, 0.0, p.x - zone.x_max)
+                dy = max(zone.y_min - p.y, 0.0, p.y - zone.y_max)
+                if (dx * dx + dy * dy) ** 0.5 <= self.arm_distance:
+                    st.armed_until = now + self.arm_seconds
+            if st.armed_until >= now:
+                armed.append(zone.name)
+        return armed
+
     def _travel(self, zone: Zone, st: ZoneState, now: float) -> float:
         """Metres moved in the leave direction over the recent track (negative = returning)."""
         while st.track and now - st.track[0][0] > self.track_seconds:
@@ -107,8 +137,19 @@ class ZoneTracker:
         dy = st.track[-1][1] - st.track[0][1]
         return -dy if zone.leave_toward == "back" else dy
 
-    def update(self, points: np.ndarray, now: float, weights: np.ndarray | None = None) -> dict[str, bool]:
-        """Feed one frame. Returns {zone_name: occupied} for zones that changed."""
+    def update(
+        self,
+        points: np.ndarray,
+        now: float,
+        weights: np.ndarray | None = None,
+        tracks: list | None = None,
+    ) -> dict[str, bool]:
+        """Feed one frame. Returns {zone_name: occupied} for zones that changed.
+
+        `tracks` (from PeopleTracker) make it more accurate: a tracked person
+        who is briefly hidden still counts as in the zone, and their smoothed
+        walking speed decides the direction instead of the raw point cloud.
+        """
         if not self.enabled:
             return {}
         changed: dict[str, bool] = {}
@@ -116,20 +157,38 @@ class ZoneTracker:
             st = self.states[zone.name]
             m = zone.mask(points)
             score = int(np.count_nonzero(m)) if weights is None else float(weights[m].sum())
-            if score >= zone.min_points:
+            inside = [
+                t for t in (tracks or [])
+                if t.standing and zone.x_min <= t.x <= zone.x_max and zone.y_min <= t.y <= zone.y_max
+            ]
+            if score >= zone.min_points or inside:
                 st.hits_in_a_row += 1
                 st.last_seen = now
-                if zone.leave_toward != "any":
+                directional = zone.leave_toward != "any"
+                if directional and m.any():
                     st.track.append((now, float(np.median(points[m, 1]))))
-                travel = self._travel(zone, st, now) if zone.leave_toward != "any" else 0.0
-                heading_out = zone.leave_toward == "any" or travel >= self.min_travel
-                if st.occupied and travel <= -2 * self.min_travel:
+                sign = -1.0 if zone.leave_toward == "back" else 1.0
+                if directional and inside:
+                    # Smoothed walking speed toward the exit (m/s) of whoever is in the zone.
+                    out_speeds = [sign * t.vy for t in inside]
+                    leaving = max(out_speeds) >= self.min_speed
+                    coming_back = max(out_speeds) <= -self.min_speed
+                elif directional:
+                    travel = self._travel(zone, st, now)
+                    leaving = travel >= self.min_travel
+                    coming_back = travel <= -2 * self.min_travel
+                else:
+                    leaving, coming_back = True, False
+                armed = st.armed_until >= now
+                needed = 1 if armed else self.on_frames
+                if st.occupied and coming_back:
                     st.returning = True
-                elif travel >= self.min_travel:
+                elif leaving and directional:
                     st.returning = False
-                if not st.occupied and st.hits_in_a_row >= self.on_frames and heading_out:
+                if not st.occupied and st.hits_in_a_row >= needed and (armed or leaving):
                     st.occupied = True
                     st.returning = False
+                    st.armed_until = float("-inf")  # used up
                     changed[zone.name] = True
             else:
                 st.hits_in_a_row = 0
@@ -143,3 +202,32 @@ class ZoneTracker:
 
     def counts(self, points: np.ndarray, weights: np.ndarray | None = None) -> dict[str, int]:
         return {z.name: z.count(points, weights) for z in self.zones}
+
+
+@dataclass
+class RoomPresence:
+    """Is anyone in the room? On as soon as someone is seen, off after
+    `empty_seconds` with nobody seen."""
+
+    empty_seconds: float = 300.0
+    confirm_frames: int = 3
+    occupied: bool = False
+    count: int = 0
+    _seen_in_a_row: int = 0
+    _last_seen: float = float("-inf")
+
+    def update(self, people_count: int, now: float) -> bool | None:
+        """Feed one frame's head count. Returns the new state if it changed."""
+        self.count = people_count
+        if people_count > 0:
+            self._seen_in_a_row += 1
+            self._last_seen = now
+            if not self.occupied and self._seen_in_a_row >= self.confirm_frames:
+                self.occupied = True
+                return True
+        else:
+            self._seen_in_a_row = 0
+            if self.occupied and now - self._last_seen >= self.empty_seconds:
+                self.occupied = False
+                return False
+        return None

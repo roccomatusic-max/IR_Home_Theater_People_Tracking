@@ -26,6 +26,7 @@
   button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
   .badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #2a3038; color: var(--quiet); }
   .badge.on { background: var(--on); color: #000; font-weight: 600; }
+  .badge.armed { background: #fff35c; color: #000; font-weight: 600; }
   .count { font-variant-numeric: tabular-nums; color: var(--quiet); font-size: 12px; }
   #msg { color: var(--quiet); font-size: 12px; }
 </style>
@@ -34,22 +35,24 @@
 <header>
   <h1>Walkway zone setup</h1>
   <span class="badge" id="det"></span>
+  <span class="badge" id="room"></span>
   <span class="count" id="cam"></span>
   <span id="msg"></span>
   <button id="level" title="Find the floor and work out the camera's height and tilt">Auto-level camera</button>
+  <button id="learn" title="Remember the empty room so seated people can be tracked">Learn empty room</button>
   <button class="primary" id="save">Save to config</button>
 </header>
 <main>
   <div id="wrap">
     <canvas id="cv"></canvas>
-    <div class="hint">Screen is at the top. Brighter means taller. Drag on empty space to draw a zone, drag inside a zone to move it, and drag its corner to resize it. Changes take effect right away. Press Save to keep them after a restart.</div>
+    <div class="hint">Pink dot = someone standing (with a line showing where they're heading), blue ring = someone seated. A yellow zone is armed: someone just stood up next to it, so it will react on the first step in. Screen is at the top. Brighter means taller. Drag on empty space to draw a zone, drag inside a zone to move it, and drag its corner to resize it. Changes take effect right away. Press Save to keep them after a restart.</div>
   </div>
   <aside id="list"></aside>
 </main>
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const img = new Image();
-let camera = {}, loaded = false, lastServerMsg = '', bounds = null, zones = [], counts = {}, occupied = {}, version = -1, sel = -1, drag = null, dirty = false;
+let people = [], armed = [], camera = {}, loaded = false, lastServerMsg = '', bounds = null, zones = [], counts = {}, occupied = {}, version = -1, sel = -1, drag = null, dirty = false;
 
 // metres <-> canvas pixels (canvas pixel = one heightmap cell)
 const mx = x => (x - bounds.x0) / (bounds.x1 - bounds.x0) * cv.width;
@@ -81,13 +84,21 @@ function draw() {
   ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
   for (let x = Math.ceil(bounds.x0); x <= bounds.x1; x++) { ctx.beginPath(); ctx.moveTo(mx(x), 0); ctx.lineTo(mx(x), cv.height); ctx.stroke(); }
   for (let y = Math.ceil(bounds.y0); y <= bounds.y1; y++) { ctx.beginPath(); ctx.moveTo(0, my(y)); ctx.lineTo(cv.width, my(y)); ctx.stroke(); }
+  // people: filled = standing, ring = seated, line = where they're heading
+  people.forEach(p => {
+    const x = mx(p.x), y = my(p.y);
+    ctx.strokeStyle = ctx.fillStyle = p.standing ? '#ff5fa2' : '#7fd3ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x, y, 12, 0, 7); p.standing ? ctx.fill() : ctx.stroke();
+    const sp = Math.hypot(p.vx, p.vy);
+    if (sp > 0.2) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(mx(p.x + p.vx * 0.8), my(p.y + p.vy * 0.8)); ctx.stroke(); }
+  });
   // camera position
   ctx.fillStyle = '#4aa3ff'; ctx.beginPath(); ctx.arc(mx(camera.x || 0), my(camera.y || 0), 8, 0, 7); ctx.fill();
   zones.forEach((z, i) => {
-    const q = rect(z), on = occupied[z.name];
+    const q = rect(z), on = occupied[z.name], arm = armed.includes(z.name);
     ctx.fillStyle = on ? 'rgba(60,207,110,0.25)' : 'rgba(255,160,0,0.10)';
     ctx.fillRect(q.l, q.t, q.r - q.l, q.b - q.t);
-    ctx.strokeStyle = on ? '#3ccf6e' : '#ffa000'; ctx.lineWidth = i === sel ? 3 : 1.5;
+    ctx.strokeStyle = on ? '#3ccf6e' : arm ? '#fff35c' : '#ffa000'; ctx.lineWidth = i === sel || arm ? 3 : 1.5;
     ctx.strokeRect(q.l, q.t, q.r - q.l, q.b - q.t);
     ctx.fillStyle = ctx.strokeStyle; ctx.fillRect(q.r - 6, q.b - 6, 12, 12);
     ctx.font = '600 22px system-ui'; ctx.fillText(z.name, q.l + 8, q.t + 26);
@@ -141,7 +152,8 @@ function updateLive() {
     const z = zones[i]; if (!z) return;
     const on = occupied[z.name], c = counts[z.name];
     const b = d.querySelector('[data-badge]');
-    b.textContent = on ? 'OCCUPIED' : 'clear'; b.className = 'badge' + (on ? ' on' : '');
+    const arm = armed.includes(z.name);
+    b.textContent = on ? 'OCCUPIED' : arm ? 'armed' : 'clear'; b.className = 'badge' + (on ? ' on' : arm ? ' armed' : '');
     d.querySelector('[data-count]').textContent = c === undefined ? '' : `${c} / ${z.min_points} pts`;
   });
 }
@@ -155,6 +167,10 @@ async function send(save) {
   if (save) { dirty = false; msg('Saved to config'); }
 }
 function msg(t) { document.getElementById('msg').textContent = t; }
+document.getElementById('learn').onclick = async () => {
+  if (!confirm('Everyone needs to be out of the room (and out of view) for a few seconds. Ready?')) return;
+  await fetch('/learn', { method: 'POST' });
+};
 document.getElementById('level').onclick = async () => {
   if (!confirm('Auto-level needs a clear view of the floor. Move anything big out of the way, then press OK.')) return;
   await fetch('/calibrate', { method: 'POST' });
@@ -216,7 +232,10 @@ async function poll() {
       if (first) { zones = s.zones; }
       renderList();
     }
-    counts = s.counts; occupied = s.occupied; updateLive();
+    counts = s.counts; occupied = s.occupied; people = s.people || []; armed = s.armed || []; updateLive();
+    const rm = document.getElementById('room'), r = s.room || {};
+    rm.textContent = r.mapped ? `${r.count} ${r.count === 1 ? 'person' : 'people'} in the room` : 'Empty room not learned (standing people only)';
+    rm.className = 'badge' + (r.mapped && r.occupied ? ' on' : '');
     if (s.version !== version) { version = s.version; img.src = '/map.png?v=' + version; }
     else draw();
   } catch (e) { msg('Lost connection to the tracker'); }

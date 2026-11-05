@@ -269,21 +269,59 @@ def test_switch_discovery_payload():
     assert cfg["command_topic"] == SWITCH_SET and cfg["state_topic"] == SWITCH_STATE
 
 
-def test_switch_restores_last_state_and_obeys_commands():
+def make_fake_publisher():
     import threading
     from types import SimpleNamespace
 
-    from walkway.mqtt import SWITCH_SET, SWITCH_STATE, Publisher
+    from walkway.mqtt import SWITCHES, Publisher
 
     published, seen = [], []
     pub = Publisher.__new__(Publisher)  # skip the network connection
     pub._client = SimpleNamespace(publish=lambda t, p, retain=False: published.append((t, p)))
-    pub._enabled, pub._restored, pub.on_switch = True, threading.Event(), seen.append
-    msg = lambda topic, value: SimpleNamespace(topic=topic, payload=value.encode())
+    pub._switch = {k: d for k, (_, d, _) in SWITCHES.items()}
+    pub._restored = {k: threading.Event() for k in SWITCHES}
+    pub._lock = threading.Lock()
+    pub._room = None
+    pub.on_switch = lambda k, v: seen.append((k, v))
+    return pub, published, seen
 
-    pub._on_message(None, None, msg(SWITCH_STATE, "OFF"))  # retained state from before a restart
-    assert seen == [False] and published == []
-    pub._on_message(None, None, msg(SWITCH_STATE, "ON"))  # our own echo later: ignored
-    assert seen == [False]
-    pub._on_message(None, None, msg(SWITCH_SET, "ON"))  # user flips it in Home Assistant
-    assert seen == [False, True] and published == [(SWITCH_STATE, "ON")]
+
+def mqtt_msg(topic, value):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(topic=topic, payload=value.encode())
+
+
+def test_switch_restores_last_state_and_obeys_commands():
+    from walkway.mqtt import SWITCH_SET, SWITCH_STATE
+
+    pub, published, seen = make_fake_publisher()
+    pub._on_message(None, None, mqtt_msg(SWITCH_STATE, "OFF"))  # retained state from before a restart
+    assert seen == [("detection", False)] and published == []
+    pub._on_message(None, None, mqtt_msg(SWITCH_STATE, "ON"))  # our own echo later: ignored
+    assert seen == [("detection", False)]
+    pub._on_message(None, None, mqtt_msg(SWITCH_SET, "ON"))  # user flips it in Home Assistant
+    assert seen[-1] == ("detection", True) and published == [(SWITCH_STATE, "ON")]
+
+
+def test_auto_off_switch_defaults_off_and_is_separate():
+    from walkway.mqtt import switch_topics
+
+    pub, published, seen = make_fake_publisher()
+    assert pub.switch("empty_auto_off") is False and pub.switch("detection") is True
+    pub._on_message(None, None, mqtt_msg(switch_topics("empty_auto_off")[1], "ON"))
+    assert pub.switch("empty_auto_off") is True and pub.switch("detection") is True
+    assert seen == [("empty_auto_off", True)]
+
+
+def test_room_sensors_publish_only_on_change():
+    from walkway.mqtt import PEOPLE_TOPIC, ROOM_TOPIC, room_discovery
+
+    pub, published, _ = make_fake_publisher()
+    pub.room(2, True)
+    pub.room(2, True)
+    pub.room(0, True)
+    assert published == [(PEOPLE_TOPIC, "2"), (ROOM_TOPIC, "ON"), (PEOPLE_TOPIC, "0"), (ROOM_TOPIC, "ON")]
+    topics = [t for t, _ in room_discovery()]
+    assert topics == ["homeassistant/sensor/theater_walkway_people/config",
+                      "homeassistant/binary_sensor/theater_walkway_room/config"]

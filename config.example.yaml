@@ -43,6 +43,16 @@ tracking:
   return_off_seconds: 5   # ...or this long if the last person was walking back to a seat
   stride: 4          # use every Nth pixel; raise if the computer is slow
 
+room:
+  empty_map: empty_room.npz   # learned with "Learn empty room" on the setup page
+  empty_minutes: 5            # "Theater occupied" turns off after this long with nobody seen
+  arm_distance: 1.2           # someone standing up this close (m) to a walkway pre-arms it
+  arm_seconds: 8              # pre-arm lasts this long after they were last near it
+
+oak:
+  resolution: 400p   # 800p is more accurate at the far end of the room but needs more CPU
+  fps: 15
+
 mqtt:
   host: homeassistant.local
   port: 1883

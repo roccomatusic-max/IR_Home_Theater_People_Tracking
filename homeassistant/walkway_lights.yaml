@@ -44,3 +44,23 @@
         - action: light.turn_off
           target: { entity_id: light.right_walkway }
           data: { transition: 3 }
+
+# Room empty -> lights and projector off. Only runs while the
+# "Auto-off when room is empty" switch is on; it starts OFF, so nothing happens
+# until you turn it on in Home Assistant (or have an automation turn it on, e.g.
+# only at night). "Theater occupied" turns off after room.empty_minutes with
+# nobody seen; it needs "Learn empty room" done so seated people are counted.
+- alias: Theater - auto-off when empty
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.theater_walkway_room
+      to: "off"
+  conditions:
+    - condition: state
+      entity_id: switch.theater_walkway_empty_auto_off
+      state: "on"
+  actions:
+    - action: light.turn_off
+      target: { entity_id: [light.left_walkway, light.right_walkway] }  # add your other theater lights
+    - action: media_player.turn_off
+      target: { entity_id: media_player.theater }  # your projector / AV receiver
