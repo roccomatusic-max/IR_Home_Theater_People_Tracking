@@ -72,6 +72,24 @@ On the camera itself, high-accuracy stereo, subpixel depth (sharper at the far e
 
 The **Auto-off when room is empty** switch (`switch.theater_walkway_empty_auto_off`) starts **off**. The example automation in `homeassistant/walkway_lights.yaml` only turns things off while it's on, so you decide when, for example by turning it on at night only.
 
+## Keeping it running
+
+- **Camera reconnects.** If the camera drops (cable, PoE switch, power blip) or goes quiet for 5 seconds, the tracker reconnects on its own, waiting 1 s at first and backing off to 30 s between tries. The walkway sensors stay where they were in the meantime.
+- **Health in Home Assistant.** You get `binary_sensor.theater_walkway_camera` (online), `sensor.theater_walkway_fps`, `sensor.theater_walkway_delay` (processing time per frame, in ms) and `binary_sensor.theater_walkway_camera_moved`. Alert on the camera going offline or on "camera moved" with an ordinary automation.
+- **Bump detection.** Once a minute the tracker re-finds the floor. If three checks in a row disagree with the saved height or tilt (more than 6 cm or 2.5°), it flags **Camera moved** and tells you to auto-level again. A single odd reading, like someone lying on the floor, is ignored.
+- **What happened.** The setup page lists recent events, newest first, and every event is also written to `events.jsonl` next to `config.yaml`, rotated at 1 MB. Events are walkway on/off, pre-arm, room occupied or empty, camera offline or moved, and switch changes. They're names and numbers, never images.
+
+## Walk test
+
+Press **Start walk test** on the setup page. Then walk each walkway a few times, and sit down and stand up in the seats next to them. Press **Stop and show report**. For each zone it shows:
+
+- how strong a weak but real walk-through scored,
+- the highest score while nobody was walking in it (seated neighbours, blankets, noise),
+- how many times it fired,
+- a suggested **Points needed** with an **Apply** button.
+
+If walking and sitting look too similar, it tells you to raise the zone's height limit, pull the zone away from the seats, or move the camera instead.
+
 ## Movie-mode switch
 
 Home Assistant also gets a switch, `switch.theater_walkway_detection`. Turn it off during cleaning, or whenever the room lights are on, and the tracker stops turning zones on. The setup page shows whether it's on, and the tracker remembers the setting across restarts. To flip it automatically, add an automation that turns it on when your projector or media player starts and off when it stops.
@@ -98,4 +116,4 @@ python -m pytest
 | `room.empty_minutes` | 5 | "occupied" turns off during a quiet scene | auto-off takes too long |
 | `oak.resolution` | 400p | far seats are missed (back-wall mount) | the computer can't keep up |
 
-The camera code (`walkway/sources.py`, `OakDepthSource`) uses the depthai 2.x API and hasn't been tested on real hardware yet. The geometry, auto-level, people finding, tracking, pre-arming, direction logic, Home Assistant sensors and switches, and setup page are covered by 53 tests. They use a simulated room with two rows of seats, ceiling and back-wall mounts, 1% depth noise and 10% missing pixels. The Windows install scripts haven't been run on Windows yet.
+The camera code (`walkway/sources.py`, `OakDepthSource`) uses the depthai 2.x API and hasn't been tested on real hardware yet. The geometry, auto-level, people finding, tracking, pre-arming, direction logic, Home Assistant sensors and switches, setup page, reconnects, bump detection, the event log and the walk test, are covered by 63 tests. They use a simulated room with two rows of seats, ceiling and back-wall mounts, 1% depth noise and 10% missing pixels. The Windows install scripts haven't been run on Windows yet.

@@ -90,6 +90,24 @@ class OakDepthSource:
         while True:
             yield self._queue.get().getFrame()  # uint16, millimetres
 
+    def frames_with_timeout(self, timeout: float) -> Iterator[np.ndarray]:
+        """Like frames(), but raises if the camera goes quiet for `timeout` seconds."""
+        import time
+
+        last = time.monotonic()
+        while True:
+            msg = self._queue.tryGet()
+            if msg is not None:
+                last = time.monotonic()
+                yield msg.getFrame()
+                continue
+            if self._device.isClosed() or time.monotonic() - last > timeout:
+                raise RuntimeError(f"no depth frame for {timeout:.0f} s")
+            time.sleep(0.005)
+
+    def close(self) -> None:
+        self._device.close()
+
 
 class SimDepthSource:
     """Renders synthetic depth frames of an empty floor plus box-shaped people.

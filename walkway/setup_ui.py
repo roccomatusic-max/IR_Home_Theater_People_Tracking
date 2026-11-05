@@ -101,7 +101,13 @@ class SetupServer:
         port: int = 8099,
         on_zones_changed=None,
         lock: threading.RLock | None = None,
+        events=None,
+        walktest=None,
     ):
+        self.events = events
+        self.walktest = walktest
+        self.walk_report: dict | None = None
+        self.health: dict = {}
         self.tracker = tracker
         self.on_zones_changed = on_zones_changed  # called with (old_names, new_names)
         self.config_path = config_path
@@ -139,12 +145,35 @@ class SetupServer:
                 elif self.path.startswith("/map.png"):
                     with server.lock:
                         self._send(200, server.png, "image/png")
+                elif self.path.startswith("/events.json"):
+                    evs = server.events.last(100) if server.events else []
+                    self._send(200, json.dumps(evs[::-1]).encode(), "application/json")
                 elif self.path == "/state.json":
                     self._send(200, json.dumps(server.state()).encode(), "application/json")
                 else:
                     self._send(404, b"not found", "text/plain")
 
             def do_POST(self):
+                if self.path in ("/walktest/start", "/walktest/stop"):
+                    import time as _t
+
+                    with server.lock:
+                        wt = server.walktest
+                        if wt is None:
+                            return self._send(404, b"not available", "text/plain")
+                        if self.path.endswith("start"):
+                            wt.start([z.name for z in server.tracker.zones], _t.monotonic())
+                            server.walk_report = None
+                            server.message = "Walk test running: walk each walkway, sit and stand in the seats."
+                            if server.events:
+                                server.events.add("walk_test", running=True)
+                        else:
+                            server.walk_report = wt.report(server.tracker.zones, _t.monotonic())
+                            wt.stop()
+                            server.message = "Walk test finished. See the report below the zones."
+                            if server.events:
+                                server.events.add("walk_test", running=False)
+                    return self._send(200, json.dumps(server.state()).encode(), "application/json")
                 if self.path == "/learn":
                     with server.lock:
                         server.learn_requested = True
@@ -222,6 +251,8 @@ class SetupServer:
                 "people": self.people,
                 "armed": self.armed,
                 "room": {"mapped": self.room_mapped, "count": self.people_count, "occupied": self.room_occupied},
+                "health": self.health,
+                "walktest": {"running": bool(self.walktest and self.walktest.running), "report": self.walk_report},
             }
 
     def close(self) -> None:

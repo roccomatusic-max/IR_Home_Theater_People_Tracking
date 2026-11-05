@@ -21,6 +21,7 @@ import numpy as np
 
 from . import config as cfgmod
 from .geometry import Mount, depth_to_camera_points, fit_floor
+from .health import BumpCheck, EventLog, Health, WalkTest
 from .people import EmptyRoom
 from .pipeline import Pipeline, make_zone_tracker
 
@@ -39,9 +40,17 @@ def make_source(cfg: cfgmod.Config, sim: bool):
                 src.furniture += [(x, y, 0.7, 0.6, 0.5), (x, y - 0.38, 0.7, 0.15, 1.0)]
         src.people = [(-0.4, 0.6, 1.25), (0.4, 0.6, 1.25), (0.4, -0.9, 1.25), (-1.2, -0.9, 1.75)]
         return src
+    from .health import ResilientSource
     from .sources import OakDepthSource
 
-    return OakDepthSource(resolution=str(cfg.oak.get("resolution", "400p")), fps=int(cfg.oak.get("fps", 15)))
+    def open_camera():
+        return OakDepthSource(resolution=str(cfg.oak.get("resolution", "400p")), fps=int(cfg.oak.get("fps", 15)))
+
+    # Reconnects on its own if the camera drops; status goes to the event log and Home Assistant.
+    return ResilientSource(open_camera, on_status=lambda online: CAMERA_STATUS.append(online))
+
+
+CAMERA_STATUS: list[bool] = []  # camera online/offline changes, drained by the main loop
 
 
 def calibrate(depth: np.ndarray, source, cfg: cfgmod.Config, config_path: str) -> Mount:
@@ -103,6 +112,9 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", handlers=handlers)
 
     cfg = cfgmod.load(args.config)
+    events = EventLog(cfg.path.parent / "events.jsonl")
+    health, bump = Health(), BumpCheck()
+    walktest = WalkTest()
     source = make_source(cfg, args.sim)
     pipe = Pipeline(source.intrinsics, cfg.mount, make_zone_tracker(cfg.zones, cfg), stride=cfg.stride)
     pipe.presence.empty_seconds = 60 * float(cfg.room.get("empty_minutes", 5))
@@ -125,6 +137,7 @@ def main() -> None:
         from .mqtt import Publisher
 
         def switch_changed(key: str, value: bool) -> None:
+            events.add("switch", switch=key, on=value)
             if key != "detection":
                 return  # the auto-off switch is used by Home Assistant automations
             with lock:
@@ -153,17 +166,27 @@ def main() -> None:
                 publisher.forget(name)
             publisher.announce([n for n in new if n not in old])
 
-        setup = SetupServer(tracker, args.config, args.port, on_zones_changed=zones_changed, lock=lock)
+        setup = SetupServer(tracker, args.config, args.port, on_zones_changed=zones_changed, lock=lock,
+                            events=events, walktest=walktest)
         setup.camera = camera_dict(pipe.mount)
         setup.room_mapped = pipe.room_mapped
 
-    last_print = last_map = 0.0
+    last_print = last_map = last_health = 0.0
+    armed_before: set[str] = set()
+    camera_online = True
     for depth in frames:
+        frame_time = time.monotonic()
+        pipe.intrinsics = source.intrinsics  # may change after a camera reconnect
+        while CAMERA_STATUS:
+            camera_online = CAMERA_STATUS.pop(0)
+            events.add("camera", online=camera_online)
         if setup and setup.calibrate_requested:
             try:
                 pipe.set_mount(calibrate(depth, source, cfg, args.config))
                 msg = "Auto-level: height {height} m, tilt {tilt_deg}°, roll {roll_deg}°. Saved.".format(**camera_dict(pipe.mount))
                 msg += " Now press Learn empty room." if args.setup else ""
+                events.add("auto_level", **camera_dict(pipe.mount))
+                bump.moved, bump.detail = False, ""
             except ValueError as e:
                 msg = f"Auto-level failed: {e}"
             with lock:
@@ -174,6 +197,7 @@ def main() -> None:
                 setup.bounds = None  # the floor plan moved; recompute the view
         if setup and setup.learn_requested:
             learn_empty(pipe, frames, cfg, first=depth, source=source)
+            events.add("learned_empty_room")
             if publisher:
                 publisher.announce_room()
             with lock:
@@ -184,8 +208,33 @@ def main() -> None:
             save_heightmap(pipe.points(depth)[0], cfg, args.heightmap)
             return
         now = time.monotonic()
+        if bump.due(now) and not args.sim:
+            try:
+                changed_bump = bump.check(fit_floor(depth_to_camera_points(depth, pipe.intrinsics, stride=4)), pipe.mount, now)
+                if changed_bump is not None:
+                    events.add("camera_moved" if changed_bump else "camera_ok", detail=bump.detail)
+                    if setup and changed_bump:
+                        setup.message = bump.detail
+            except ValueError:
+                pass  # floor not visible right now (e.g. people everywhere); try next time
         r = pipe.process(depth, now)
         del depth  # nothing is kept between frames
+        for name, on in r.zone_changes.items():
+            events.add("walkway", zone=name, on=on, people=len(r.tracks))
+        armed_now = set(r.armed)
+        for name in armed_now - armed_before:
+            events.add("armed", zone=name)
+        armed_before = armed_now
+        if r.room_change is not None:
+            events.add("room", occupied=r.room_change)
+        if walktest.running:
+            with lock:
+                scores = tracker.counts(r.points, r.weights)
+                walktest.feed(tracker.zones, scores, r.tracks, r.zone_changes, now)
+        health.tick(frame_time, time.monotonic())
+        if publisher and now - last_health >= 10:
+            last_health = now
+            publisher.health(camera_online, health.fps, health.delay_ms, bump.moved)
         if publisher:
             for name, occupied in r.zone_changes.items():
                 publisher.state(name, occupied)
@@ -195,6 +244,8 @@ def main() -> None:
             fresh_map = now - last_map >= 0.5
             setup.update(r.points, with_image=fresh_map, weights=r.weights, tracks=r.tracks, armed=r.armed,
                          people_count=len(r.tracks), room_occupied=pipe.presence.occupied)
+            setup.health = {"online": camera_online, "fps": round(health.fps, 1),
+                            "delay_ms": round(health.delay_ms), "moved": bump.moved}
             if fresh_map:
                 last_map = now
         if args.tune and now - last_print >= 1.0:

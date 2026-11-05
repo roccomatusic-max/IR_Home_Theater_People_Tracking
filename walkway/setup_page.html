@@ -26,6 +26,12 @@
   button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
   .badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #2a3038; color: var(--quiet); }
   .badge.on { background: var(--on); color: #000; font-weight: 600; }
+  .badge.bad { background: #ff5c5c; color: #000; font-weight: 600; }
+  .events { max-height: 260px; overflow-y: auto; font-size: 12px; margin-top: 6px; }
+  .events div { padding: 3px 0; border-bottom: 1px solid var(--line); color: var(--quiet); }
+  .events b { color: var(--ink); font-weight: 600; }
+  #walkreport table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  #walkreport td, #walkreport th { text-align: left; padding: 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
   .badge.armed { background: #fff35c; color: #000; font-weight: 600; }
   .count { font-variant-numeric: tabular-nums; color: var(--quiet); font-size: 12px; }
   #msg { color: var(--quiet); font-size: 12px; }
@@ -36,6 +42,7 @@
   <h1>Walkway zone setup</h1>
   <span class="badge" id="det"></span>
   <span class="badge" id="room"></span>
+  <span class="badge" id="health"></span>
   <span class="count" id="cam"></span>
   <span id="msg"></span>
   <button id="level" title="Find the floor and work out the camera's height and tilt">Auto-level camera</button>
@@ -47,7 +54,18 @@
     <canvas id="cv"></canvas>
     <div class="hint">Pink dot = someone standing (with a line showing where they're heading), blue ring = someone seated. A yellow zone is armed: someone just stood up next to it, so it will react on the first step in. Screen is at the top. Brighter means taller. Drag on empty space to draw a zone, drag inside a zone to move it, and drag its corner to resize it. Changes take effect right away. Press Save to keep them after a restart.</div>
   </div>
-  <aside id="list"></aside>
+  <aside>
+    <div id="list"></div>
+    <div class="zone">
+      <div class="row"><strong>Walk test</strong><button id="walk" style="margin-left:auto">Start walk test</button></div>
+      <div class="hint">Start it, then walk each walkway a few times, and sit down and stand up in the seats next to them. Stop it to get a report with suggested settings.</div>
+      <div id="walkreport"></div>
+    </div>
+    <div class="zone">
+      <div class="row"><strong>What happened</strong><span class="count" style="margin-left:auto">newest first, no images</span></div>
+      <div id="events" class="events"></div>
+    </div>
+  </aside>
 </main>
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
@@ -216,6 +234,52 @@ cv.addEventListener('pointerup', () => {
   changed();
 });
 
+const evText = e => {
+  const z = e.zone ? e.zone.replace(/_/g, ' ') : '';
+  switch (e.kind) {
+    case 'walkway': return `<b>${z}</b> lights ${e.on ? 'ON' : 'off'}` + (e.on ? '' : '');
+    case 'armed': return `<b>${z}</b> armed (someone stood up next to it)`;
+    case 'room': return `Theater <b>${e.occupied ? 'occupied' : 'empty'}</b>`;
+    case 'camera': return `Camera <b>${e.online ? 'online' : 'OFFLINE'}</b>`;
+    case 'camera_moved': return `<b>Camera moved</b>: ${esc(e.detail || '')}`;
+    case 'camera_ok': return 'Camera position back to normal';
+    case 'switch': return `Switch <b>${e.switch === 'detection' ? 'Walkway detection' : 'Auto-off when empty'}</b> ${e.on ? 'on' : 'off'}`;
+    case 'auto_level': return `Auto-level: ${e.height} m, tilt ${e.tilt_deg}°`;
+    case 'learned_empty_room': return 'Learned the empty room';
+    case 'walk_test': return `Walk test ${e.running ? 'started' : 'finished'}`;
+    default: return esc(e.kind);
+  }
+};
+async function pollEvents() {
+  try {
+    const evs = await (await fetch('/events.json')).json();
+    document.getElementById('events').innerHTML = evs.map(e =>
+      `<div>${new Date(e.t * 1000).toLocaleTimeString()} · ${evText(e)}</div>`).join('') || '<div>Nothing yet.</div>';
+  } catch (e) {}
+  setTimeout(pollEvents, 3000);
+}
+function renderWalk(w) {
+  const btn = document.getElementById('walk');
+  btn.textContent = w.running ? 'Stop and show report' : 'Start walk test';
+  btn.className = w.running ? 'primary' : '';
+  const el = document.getElementById('walkreport');
+  if (w.running) { el.innerHTML = '<div class="hint">Recording...</div>'; return; }
+  if (!w.report) { el.innerHTML = ''; return; }
+  const r = w.report;
+  el.innerHTML = `<div class="hint">${r.seconds} s test · people seen: ${r.people_seen[0]}–${r.people_seen[1]}</div>
+    <table><tr><th>Zone</th><th>Walking (weak)</th><th>Not walking (max)</th><th>Advice</th></tr>` +
+    r.zones.map(z => `<tr><td>${esc(z.zone)}<br><span class="count">fired ${z.triggers}×</span></td>
+      <td>${z.walk_low ?? '–'}</td><td>${z.idle_max}</td><td>${esc(z.advice)}` +
+      (z.suggested ? ` <button data-apply="${esc(z.zone)}" data-v="${z.suggested}">Apply</button>` : '') + `</td></tr>`).join('') + '</table>';
+  el.querySelectorAll('[data-apply]').forEach(b => b.onclick = () => {
+    const z = zones.find(q => q.name === b.dataset.apply); if (z) { z.min_points = Number(b.dataset.v); changed(); }
+  });
+}
+let walkRunning = false, walkShown = null;
+document.getElementById('walk').onclick = async () => {
+  const s = await (await fetch(walkRunning ? '/walktest/stop' : '/walktest/start', { method: 'POST' })).json();
+  walkRunning = s.walktest.running; walkShown = JSON.stringify(s.walktest); renderWalk(s.walktest);
+};
 async function poll() {
   try {
     const s = await (await fetch('/state.json')).json();
@@ -232,6 +296,12 @@ async function poll() {
       if (first) { zones = s.zones; }
       renderList();
     }
+    const h = s.health || {}, hb = document.getElementById('health');
+    if (h.online === undefined) { hb.textContent = ''; }
+    else if (!h.online) { hb.textContent = 'Camera OFFLINE'; hb.className = 'badge bad'; }
+    else if (h.moved) { hb.textContent = 'Camera moved: auto-level again'; hb.className = 'badge bad'; }
+    else { hb.textContent = `${h.fps} fps · ${h.delay_ms} ms`; hb.className = 'badge'; }
+    if (s.walktest) { walkRunning = s.walktest.running; const k = JSON.stringify(s.walktest); if (k !== walkShown) { walkShown = k; renderWalk(s.walktest); } }
     counts = s.counts; occupied = s.occupied; people = s.people || []; armed = s.armed || []; updateLive();
     const rm = document.getElementById('room'), r = s.room || {};
     rm.textContent = r.mapped ? `${r.count} ${r.count === 1 ? 'person' : 'people'} in the room` : 'Empty room not learned (standing people only)';
@@ -244,6 +314,7 @@ async function poll() {
 img.onload = draw;
 window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 poll();
+pollEvents();
 </script>
 </body>
 </html>

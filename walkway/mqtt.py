@@ -86,6 +86,32 @@ def room_discovery(discovery_prefix: str = "homeassistant") -> list[tuple[str, s
     ]
 
 
+HEALTH_TOPIC = f"{BASE}/health"
+
+
+def health_discovery(discovery_prefix: str = "homeassistant") -> list[tuple[str, str]]:
+    """Camera online, frame rate, delay and "camera moved" sensors, all read from one JSON topic."""
+    common = {"state_topic": HEALTH_TOPIC, "availability_topic": f"{BASE}/status", "device": DEVICE,
+              "entity_category": "diagnostic"}
+    items = [
+        ("binary_sensor", "camera", {"name": "Camera", "device_class": "connectivity",
+                                     "value_template": "{{ 'ON' if value_json.online else 'OFF' }}",
+                                     "payload_on": "ON", "payload_off": "OFF"}),
+        ("binary_sensor", "camera_moved", {"name": "Camera moved", "device_class": "problem",
+                                           "value_template": "{{ 'ON' if value_json.moved else 'OFF' }}",
+                                           "payload_on": "ON", "payload_off": "OFF"}),
+        ("sensor", "fps", {"name": "Frame rate", "unit_of_measurement": "fps", "state_class": "measurement",
+                           "value_template": "{{ value_json.fps }}"}),
+        ("sensor", "delay", {"name": "Processing delay", "unit_of_measurement": "ms", "state_class": "measurement",
+                             "device_class": "duration", "value_template": "{{ value_json.delay_ms }}"}),
+    ]
+    out = []
+    for kind, key, cfg in items:
+        cfg = {**cfg, **common, "unique_id": f"{BASE}_{key}", "object_id": f"{BASE}_{key}"}
+        out.append((f"{discovery_prefix}/{kind}/{BASE}_{key}/config", json.dumps(cfg)))
+    return out
+
+
 class Publisher:
     """MQTT connection to Home Assistant. Reconnects on its own if the broker restarts."""
 
@@ -107,6 +133,7 @@ class Publisher:
         self._switch = {k: default for k, (_, default, _) in SWITCHES.items()}
         self._restored = {k: threading.Event() for k in SWITCHES}
         self._room: tuple[int, bool] | None = None
+        self._health: dict | None = None
         self._lock = threading.Lock()
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=BASE)
         if username:
@@ -135,6 +162,10 @@ class Publisher:
             client.publish(t, p, retain=True)
         for name in zones:
             client.publish(f"{BASE}/{name}/state", "ON" if states.get(name) else "OFF", retain=True)
+        for t, p in health_discovery(self.prefix):
+            client.publish(t, p, retain=True)
+        if self._health is not None:
+            client.publish(HEALTH_TOPIC, json.dumps(self._health), retain=True)
         if room is not None:
             self.announce_room()
             client.publish(PEOPLE_TOPIC, str(room[0]), retain=True)
@@ -177,6 +208,11 @@ class Publisher:
                 ev.set()
                 self._client.publish(switch_topics(key)[0], "ON" if self._switch[key] else "OFF", retain=True)
             timeout = 0.1  # the broker sends all retained states together
+
+    # --- health ---------------------------------------------------------
+    def health(self, online: bool, fps: float, delay_ms: float, moved: bool) -> None:
+        self._health = {"online": online, "fps": round(fps, 1), "delay_ms": round(delay_ms), "moved": moved}
+        self._client.publish(HEALTH_TOPIC, json.dumps(self._health), retain=True)
 
     # --- room -----------------------------------------------------------
     def announce_room(self) -> None:
