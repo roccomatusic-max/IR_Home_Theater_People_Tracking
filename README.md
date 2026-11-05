@@ -2,7 +2,7 @@
 
 An overhead depth camera watches the left and right walkways. When someone stands up and walks into one, that side's walkway lights come on very low. People sitting in their seats don't trigger anything.
 
-Privacy: only the camera's two infrared depth sensors are used. The color camera is never turned on, and no images or video are saved. Each depth frame is turned into a yes/no per walkway and then thrown away. All of this runs on a computer in the room, with nothing sent to the cloud.
+Privacy: only the camera's two infrared depth sensors are used. The color camera is never turned on, and no images or video are saved. Each depth frame is turned into a yes/no per walkway and then thrown away. All of this runs on your own network, with nothing sent to the cloud.
 
 ## What to buy
 
@@ -41,7 +41,7 @@ The PoE camera is found on the network automatically. If it isn't, make sure the
 4. Run `python -m walkway config.yaml`. Two sensors appear in Home Assistant, `binary_sensor.theater_walkway_left_walkway` and `binary_sensor.theater_walkway_right_walkway`.
 5. Add the automations in `homeassistant/walkway_lights.yaml`, using your own light entities.
 
-To run it at boot, run `python -m walkway C:\\path\\to\\config.yaml` as a Windows service (for example with NSSM) or a Task Scheduler task "at startup". On Linux, use a systemd service.
+To run it at boot, run `python -m walkway C:\path\to\config.yaml` as a Windows service (for example with NSSM) or a Task Scheduler task "at startup". On Linux, use a systemd service.
 
 ## Trying it without the camera
 
