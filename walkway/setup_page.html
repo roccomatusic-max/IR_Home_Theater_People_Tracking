@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walkway zone setup</title>
+<style>
+  :root { --bg: #111418; --panel: #1b2027; --ink: #e8eaed; --quiet: #9aa3ad; --line: #2e353e; --accent: #ffa000; --on: #3ccf6e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; }
+  header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  main { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; }
+  #wrap { position: relative; flex: 1 1 520px; min-width: 280px; }
+  canvas { width: 100%; background: #000; border-radius: 8px; cursor: crosshair; touch-action: none; display: block; }
+  .hint { color: var(--quiet); font-size: 12px; margin-top: 6px; }
+  aside { flex: 0 1 380px; min-width: 280px; }
+  .zone { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+  .zone.sel { border-color: var(--accent); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  input { background: #0d1014; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; width: 70px; }
+  input.name { width: 150px; font-weight: 600; }
+  label { color: var(--quiet); font-size: 12px; }
+  button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #2a3038; color: var(--quiet); }
+  .badge.on { background: var(--on); color: #000; font-weight: 600; }
+  .count { font-variant-numeric: tabular-nums; color: var(--quiet); font-size: 12px; }
+  #msg { color: var(--quiet); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Walkway zone setup</h1>
+  <span id="msg"></span>
+  <button class="primary" id="save">Save to config</button>
+</header>
+<main>
+  <div id="wrap">
+    <canvas id="cv"></canvas>
+    <div class="hint">Screen is at the top. Brighter means taller. Drag on empty space to draw a zone, drag inside a zone to move it, and drag its corner to resize it. Changes take effect right away. Press Save to keep them after a restart.</div>
+  </div>
+  <aside id="list"></aside>
+</main>
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const img = new Image();
+let bounds = null, zones = [], counts = {}, occupied = {}, version = -1, sel = -1, drag = null, dirty = false;
+
+// metres <-> canvas pixels (canvas pixel = one heightmap cell)
+const mx = x => (x - bounds.x0) / (bounds.x1 - bounds.x0) * cv.width;
+const my = y => (bounds.y1 - y) / (bounds.y1 - bounds.y0) * cv.height;
+const xm = px => bounds.x0 + px / cv.width * (bounds.x1 - bounds.x0);
+const ym = py => bounds.y1 - py / cv.height * (bounds.y1 - bounds.y0);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+const r2 = v => Math.round(v * 100) / 100;
+
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height };
+}
+function rect(z) { return { l: mx(z.x_min), r: mx(z.x_max), t: my(z.y_max), b: my(z.y_min) }; }
+function hit(p) {
+  for (let i = zones.length - 1; i >= 0; i--) {
+    const q = rect(zones[i]);
+    if (Math.abs(p.x - q.r) < 12 && Math.abs(p.y - q.b) < 12) return { i, corner: true };
+    if (p.x >= q.l && p.x <= q.r && p.y >= q.t && p.y <= q.b) return { i, corner: false };
+  }
+  return null;
+}
+
+function draw() {
+  if (!bounds) return;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (img.complete && img.naturalWidth) ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  // 1 m grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  for (let x = Math.ceil(bounds.x0); x <= bounds.x1; x++) { ctx.beginPath(); ctx.moveTo(mx(x), 0); ctx.lineTo(mx(x), cv.height); ctx.stroke(); }
+  for (let y = Math.ceil(bounds.y0); y <= bounds.y1; y++) { ctx.beginPath(); ctx.moveTo(0, my(y)); ctx.lineTo(cv.width, my(y)); ctx.stroke(); }
+  // camera position
+  ctx.fillStyle = '#4aa3ff'; ctx.beginPath(); ctx.arc(mx(0), my(0), 5, 0, 7); ctx.fill();
+  zones.forEach((z, i) => {
+    const q = rect(z), on = occupied[z.name];
+    ctx.fillStyle = on ? 'rgba(60,207,110,0.25)' : 'rgba(255,160,0,0.10)';
+    ctx.fillRect(q.l, q.t, q.r - q.l, q.b - q.t);
+    ctx.strokeStyle = on ? '#3ccf6e' : '#ffa000'; ctx.lineWidth = i === sel ? 3 : 1.5;
+    ctx.strokeRect(q.l, q.t, q.r - q.l, q.b - q.t);
+    ctx.fillStyle = ctx.strokeStyle; ctx.fillRect(q.r - 6, q.b - 6, 12, 12);
+    ctx.font = '600 13px system-ui'; ctx.fillText(z.name, q.l + 6, q.t + 16);
+  });
+  if (drag && drag.mode === 'new') {
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(drag.a.x, drag.a.y, drag.b.x - drag.a.x, drag.b.y - drag.a.y); ctx.setLineDash([]);
+  }
+}
+
+function renderList() {
+  const el = document.getElementById('list');
+  el.innerHTML = '';
+  if (!zones.length) el.innerHTML = '<div class="hint">No zones yet. Drag on the map to draw one.</div>';
+  zones.forEach((z, i) => {
+    const d = document.createElement('div');
+    d.className = 'zone' + (i === sel ? ' sel' : '');
+    d.innerHTML = `
+      <div class="row"><input class="name" data-k="name" value="${esc(z.name)}">
+        <span class="badge" data-badge></span><span class="count" data-count></span>
+        <button data-del style="margin-left:auto">Delete</button></div>
+      <div class="row"><label>From height (m)</label><input data-k="z_min" type="number" step="0.05" value="${z.z_min}">
+        <label>to</label><input data-k="z_max" type="number" step="0.05" value="${z.z_max}"></div>
+      <div class="row"><label>Points needed</label><input data-k="min_points" type="number" step="10" value="${z.min_points}">
+        <label>Size</label><span class="count">${r2(z.x_max - z.x_min)} × ${r2(z.y_max - z.y_min)} m</span></div>`;
+    d.onclick = () => { if (sel !== i) { sel = i; renderList(); draw(); } };
+    d.querySelectorAll('input').forEach(inp => inp.onchange = () => {
+      const k = inp.dataset.k;
+      z[k] = k === 'name' ? inp.value.trim().replace(/\s+/g, '_') : Number(inp.value);
+      changed();
+    });
+    d.querySelector('[data-del]').onclick = ev => { ev.stopPropagation(); zones.splice(i, 1); sel = -1; changed(); };
+    el.appendChild(d);
+  });
+  updateLive();
+}
+
+function updateLive() {
+  document.querySelectorAll('#list .zone').forEach((d, i) => {
+    const z = zones[i]; if (!z) return;
+    const on = occupied[z.name], c = counts[z.name];
+    const b = d.querySelector('[data-badge]');
+    b.textContent = on ? 'OCCUPIED' : 'clear'; b.className = 'badge' + (on ? ' on' : '');
+    d.querySelector('[data-count]').textContent = c === undefined ? '' : `${c} / ${z.min_points} pts`;
+  });
+}
+
+let applyTimer = null;
+function changed() { dirty = true; msg('Unsaved changes'); renderList(); draw(); clearTimeout(applyTimer); applyTimer = setTimeout(() => send(false), 300); }
+async function send(save) {
+  const res = await fetch('/zones', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zones, save }) });
+  const out = await res.json();
+  if (!res.ok) return msg('Error: ' + out.error);
+  if (save) { dirty = false; msg('Saved to config'); }
+}
+function msg(t) { document.getElementById('msg').textContent = t; }
+document.getElementById('save').onclick = () => send(true);
+
+cv.addEventListener('pointerdown', e => {
+  if (!bounds) return;
+  const p = pos(e), h = hit(p);
+  cv.setPointerCapture(e.pointerId);
+  if (h) { sel = h.i; drag = { mode: h.corner ? 'resize' : 'move', i: h.i, last: p }; renderList(); }
+  else drag = { mode: 'new', a: p, b: p };
+  draw();
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const p = pos(e);
+  if (drag.mode === 'new') drag.b = p;
+  else {
+    const z = zones[drag.i], dx = xm(p.x) - xm(drag.last.x), dy = ym(p.y) - ym(drag.last.y);
+    if (drag.mode === 'move') { z.x_min += dx; z.x_max += dx; z.y_min += dy; z.y_max += dy; }
+    else { z.x_max = Math.max(z.x_min + 0.1, z.x_max + dx); z.y_min = Math.min(z.y_max - 0.1, z.y_min + dy); }
+    drag.last = p;
+  }
+  draw();
+});
+cv.addEventListener('pointerup', () => {
+  if (!drag) return;
+  if (drag.mode === 'new') {
+    const { a, b } = drag;
+    if (Math.abs(b.x - a.x) > 8 && Math.abs(b.y - a.y) > 8) {
+      const taken = new Set(zones.map(z => z.name));
+      const guess = ['left_walkway', 'right_walkway'].find(n => !taken.has(n)) || `zone_${zones.length + 1}`;
+      const name = (prompt('Name for this zone', guess) || guess).trim().replace(/\s+/g, '_');
+      zones.push({ name, x_min: xm(Math.min(a.x, b.x)), x_max: xm(Math.max(a.x, b.x)),
+                   y_min: ym(Math.max(a.y, b.y)), y_max: ym(Math.min(a.y, b.y)), z_min: 1.0, z_max: 2.1, min_points: 150 });
+      sel = zones.length - 1;
+    }
+  }
+  zones.forEach(z => ['x_min', 'x_max', 'y_min', 'y_max'].forEach(k => z[k] = r2(z[k])));
+  drag = null;
+  changed();
+});
+
+async function poll() {
+  try {
+    const s = await (await fetch('/state.json')).json();
+    if (s.bounds && !bounds) {
+      bounds = s.bounds; cv.width = bounds.w * 2; cv.height = bounds.h * 2;
+      zones = s.zones; renderList();
+    }
+    counts = s.counts; occupied = s.occupied; updateLive();
+    if (s.version !== version) { version = s.version; img.src = '/map.png?v=' + version; }
+    else draw();
+  } catch (e) { msg('Lost connection to the tracker'); }
+  setTimeout(poll, 700);
+}
+img.onload = draw;
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+poll();
+</script>
+</body>
+</html>

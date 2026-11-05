@@ -33,20 +33,20 @@ pip install -r requirements.txt
 cp config.example.yaml config.yaml
 ```
 
-The PoE camera is found on the network automatically. If it isn't, make sure the server and camera are on the same subnet or VLAN, and that Windows Firewall allows Python on that network.
+The PoE camera is found on the network automatically. If it isn't, make sure the server and camera are on the same subnet or VLAN, and that Windows Firewall allows Python on that network. The firewall also needs to allow inbound TCP port 8099 for the zone setup page.
 
-1. Measure each walkway from the spot on the floor directly under the camera. Put those measurements into `zones` in `config.yaml`. Left of center is negative x, toward the screen is positive y.
-2. Run `python -m walkway config.yaml --heightmap map.png` and open `map.png`. It shows how tall things are from above, with your zone boxes drawn on it. Brighter means taller, so seat backs show up as bright bands. Adjust the boxes until they cover only the walkways.
-3. Run `python -m walkway config.yaml --tune` and walk each walkway. Each zone's point count should jump well above `min_points` while you're in it and stay near 0 while you're seated.
-4. Run `python -m walkway config.yaml`. Two sensors appear in Home Assistant, `binary_sensor.theater_walkway_left_walkway` and `binary_sensor.theater_walkway_right_walkway`.
-5. Add the automations in `homeassistant/walkway_lights.yaml`, using your own light entities.
+1. Put the camera's height (and tilt, if it's on the back wall) under `camera` in `config.yaml`, along with your MQTT login.
+2. Run `python -m walkway config.yaml --setup` and open `http://<server>:8099` in a browser on any device on your network. You'll see a live view from above, where brighter means taller, so seats and people show up and faces never do. Drag on it to draw a zone for each walkway (and any others you want), then drag zones to move them or drag their corners to resize them. Each zone lights up green and shows a live point count while someone is in it, so walk each walkway and sit in the seats next to it to check. Raise "From height" or "Points needed" if sitting triggers it. Press **Save to config** when it's right. While `--setup` is running the tracker also works normally, so you can watch the lights respond.
+3. When you're done, stop it and run `python -m walkway config.yaml` without `--setup`. One sensor per zone appears in Home Assistant, for example `binary_sensor.theater_walkway_left_walkway` and `binary_sensor.theater_walkway_right_walkway`.
+4. Add the automations in `homeassistant/walkway_lights.yaml`, using your own light entities.
 
 To run it at boot, run `python -m walkway C:\path\to\config.yaml` as a Windows service (for example with NSSM) or a Task Scheduler task "at startup". On Linux, use a systemd service.
 
 ## Trying it without the camera
 
 ```bash
-python -m walkway config.example.yaml --sim --tune   # a fake person stands in the left walkway
+python -m walkway config.example.yaml --sim --setup  # zone page with a fake person in the left walkway
+python -m walkway config.example.yaml --sim --tune   # same, printing point counts
 python -m pytest
 ```
 

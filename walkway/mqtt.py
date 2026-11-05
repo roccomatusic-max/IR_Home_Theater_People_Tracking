@@ -46,6 +46,10 @@ class Publisher:
         for topic, payload in discovery_messages(zone_names, discovery_prefix):
             self._client.publish(topic, payload, retain=True)
 
+    def forget(self, zone: str, discovery_prefix: str = "homeassistant") -> None:
+        """Remove a deleted zone's sensor from Home Assistant."""
+        self._client.publish(f"{discovery_prefix}/binary_sensor/{BASE}_{zone}/config", "", retain=True)
+
     def state(self, zone: str, occupied: bool) -> None:
         log.info("%s -> %s", zone, "ON" if occupied else "OFF")
         self._client.publish(f"{BASE}/{zone}/state", "ON" if occupied else "OFF", retain=True)

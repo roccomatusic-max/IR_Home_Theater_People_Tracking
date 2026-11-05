@@ -55,6 +55,11 @@ class ZoneTracker:
         for z in self.zones:
             self.states.setdefault(z.name, ZoneState())
 
+    def set_zones(self, zones: list[Zone]) -> None:
+        """Swap in new zones (from the setup page), keeping state for names that stay."""
+        self.zones = list(zones)
+        self.states = {z.name: self.states.get(z.name, ZoneState()) for z in self.zones}
+
     def update(self, points: np.ndarray, now: float) -> dict[str, bool]:
         """Feed one frame. Returns {zone_name: occupied} for zones that changed."""
         changed: dict[str, bool] = {}

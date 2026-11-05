@@ -87,3 +87,48 @@ def test_discovery_payload():
     assert topic == "homeassistant/binary_sensor/theater_walkway_left_walkway/config"
     assert cfg["device_class"] == "occupancy"
     assert cfg["state_topic"] == "theater_walkway/left_walkway/state"
+
+
+def test_set_zones_keeps_state_for_kept_names():
+    tracker = ZoneTracker([LEFT, RIGHT], on_frames=1)
+    tracker.update(points_with((-2.0, 0.0, 1.75)), 0.0)
+    assert tracker.states["left_walkway"].occupied
+    tracker.set_zones([LEFT, Zone("aisle", -0.5, 0.5, -2, 2)])
+    assert tracker.states["left_walkway"].occupied
+    assert set(tracker.states) == {"left_walkway", "aisle"}
+
+
+def test_setup_server_draw_and_save(tmp_path):
+    import urllib.request
+
+    import yaml
+
+    from walkway.setup_ui import SetupServer
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump({"camera": {"height": 2.6}, "zones": [], "mqtt": {"host": "x"}}))
+    tracker = ZoneTracker([])
+    seen = []
+    srv = SetupServer(tracker, cfg, port=0, on_zones_changed=lambda old, new: seen.append((old, new)))
+    port = srv.httpd.server_address[1]
+    try:
+        srv.update(points_with((-2.0, 0.0, 1.75)), with_image=True)
+        base = f"http://127.0.0.1:{port}"
+        assert urllib.request.urlopen(base + "/").read().startswith(b"<!doctype html>")
+        assert urllib.request.urlopen(base + "/map.png").read()[:4] == b"\x89PNG"
+        body = json.dumps({"save": True, "zones": [
+            {"name": "left walkway", "x_min": -1.6, "x_max": -2.4, "y_min": 2, "y_max": -2},
+        ]}).encode()
+        req = urllib.request.Request(base + "/zones", data=body, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req).read()
+        srv.update(points_with((-2.0, 0.0, 1.75)), with_image=False)
+        state = json.loads(urllib.request.urlopen(base + "/state.json").read())
+    finally:
+        srv.close()
+    assert [z.name for z in tracker.zones] == ["left_walkway"]
+    assert tracker.zones[0].x_min == -2.4 and tracker.zones[0].y_min == -2
+    assert state["counts"]["left_walkway"] >= 150
+    assert seen == [([], ["left_walkway"])]
+    saved = yaml.safe_load(cfg.read_text())
+    assert saved["zones"][0]["name"] == "left_walkway"
+    assert saved["mqtt"] == {"host": "x"}  # other settings kept
