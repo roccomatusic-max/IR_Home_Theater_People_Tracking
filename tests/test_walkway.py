@@ -132,3 +132,158 @@ def test_setup_server_draw_and_save(tmp_path):
     saved = yaml.safe_load(cfg.read_text())
     assert saved["zones"][0]["name"] == "left_walkway"
     assert saved["mqtt"] == {"host": "x"}  # other settings kept
+
+
+# --- rear-wall mounting -------------------------------------------------
+
+REAR = Mount(y=-4.5, height=2.7, tilt_deg=50)
+LONG_LEFT = Zone("left_walkway", -2.4, -1.6, -4.4, 4.0)
+
+
+def weighted(*people, mount=REAR):
+    src = SimDepthSource(mount)
+    src.people = list(people)
+    return depth_to_room_points(src.render(), src.intrinsics, mount, with_weights=True)
+
+
+@pytest.mark.parametrize("y", [-4.0, -2.0, 0.0, 2.0, 3.5])
+def test_rear_camera_sees_walker_anywhere_along_the_room(y):
+    pts, w = weighted((-2.0, y, 1.75))
+    assert LONG_LEFT.count(pts, w) >= LONG_LEFT.min_points
+
+
+def test_rear_camera_distance_weighting_evens_out_near_and_far():
+    near = LONG_LEFT.count(*weighted((-2.0, -4.0, 1.75)))
+    far = LONG_LEFT.count(*weighted((-2.0, 3.5, 1.75)))
+    raw_near = LONG_LEFT.count(weighted((-2.0, -4.0, 1.75))[0])
+    raw_far = LONG_LEFT.count(weighted((-2.0, 3.5, 1.75))[0])
+    assert raw_near > 20 * raw_far  # unweighted, far people almost vanish
+    assert 0.5 < near / far < 2.0  # weighted, they score about the same
+
+
+def test_rear_camera_ignores_seated_people():
+    pts, w = weighted((-1.0, 0.0, 1.15), (1.0, -1.0, 1.15), (0.0, 1.0, 1.15))
+    assert LONG_LEFT.count(pts, w) == 0
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [Mount(height=2.6), REAR, Mount(height=2.9, tilt_deg=35, roll_deg=4), Mount(y=-4, height=2.5, tilt_deg=60, roll_deg=-3)],
+)
+def test_auto_level_recovers_height_tilt_roll(mount):
+    from walkway.geometry import depth_to_camera_points, fit_floor
+
+    src = SimDepthSource(mount)
+    src.people = [(-2.0, 0.0, 1.75), (1.0, 1.0, 1.2)]
+    depth = src.render().astype(np.float32)
+    rng = np.random.default_rng(1)
+    depth *= 1 + rng.normal(0, 0.005, depth.shape)  # ~0.5% depth noise
+    fit = fit_floor(depth_to_camera_points(depth.astype(np.uint16), src.intrinsics, stride=2))
+    assert fit.height == pytest.approx(mount.height, abs=0.03)
+    assert fit.tilt_deg == pytest.approx(mount.tilt_deg, abs=1.0)
+    assert fit.roll_deg == pytest.approx(mount.roll_deg, abs=1.0)
+
+
+def test_save_camera_keeps_other_settings(tmp_path):
+    import yaml
+
+    from walkway.config import load, save_camera
+
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"camera": {"x": 0.5}, "zones": [{"name": "a", "x_min": 0, "x_max": 1, "y_min": 0, "y_max": 1}]}))
+    save_camera(p, height=2.71234, tilt_deg=48.2, roll_deg=-1.0)
+    cfg = load(p)
+    assert cfg.mount == Mount(x=0.5, height=2.712, tilt_deg=48.2, roll_deg=-1.0)
+    assert cfg.zones[0].name == "a"
+
+
+# --- only light the way out --------------------------------------------
+
+def walk(tracker, ys, t0=0.0, dt=0.1, zone_x=-2.0):
+    """Feed frames of one person walking through the given y positions."""
+    events = []
+    for i, y in enumerate(ys):
+        pts = points_with((zone_x, y, 1.75)) if y is not None else points_with()
+        events.append(tracker.update(pts, t0 + i * dt))
+    return {k: v for e in events for k, v in e.items()}
+
+
+def test_leaving_toward_back_turns_on():
+    z = Zone("left_walkway", -2.4, -1.6, -2.0, 2.0, leave_toward="back")
+    tracker = ZoneTracker([z])
+    assert walk(tracker, np.linspace(1.0, -1.0, 15)) == {"left_walkway": True}
+
+
+def test_returning_to_seat_does_not_turn_on():
+    z = Zone("left_walkway", -2.4, -1.6, -2.0, 2.0, leave_toward="back")
+    tracker = ZoneTracker([z])
+    assert walk(tracker, np.linspace(-1.0, 1.0, 15)) == {}
+
+
+def test_standing_still_in_walkway_does_not_turn_on_directional_zone():
+    z = Zone("left_walkway", -2.4, -1.6, -2.0, 2.0, leave_toward="back")
+    tracker = ZoneTracker([z])
+    assert walk(tracker, [0.0] * 15) == {}
+
+
+def test_coming_back_turns_lights_off_sooner():
+    z = Zone("left_walkway", -2.4, -1.6, -2.0, 2.0, leave_toward="back")
+    tracker = ZoneTracker([z], off_seconds=30, return_off_seconds=5)
+    walk(tracker, np.linspace(1.0, -1.5, 15))  # leaves: lights on
+    assert tracker.states["left_walkway"].occupied
+    walk(tracker, list(np.linspace(-1.5, 1.0, 15)) + [None], t0=60.0)  # comes back, sits down
+    assert walk(tracker, [None], t0=64.0) == {}
+    assert walk(tracker, [None], t0=67.0) == {"left_walkway": False}
+
+
+def test_leave_toward_screen():
+    z = Zone("right_walkway", 1.6, 2.4, -2.0, 2.0, leave_toward="screen")
+    tracker = ZoneTracker([z])
+    assert walk(tracker, np.linspace(-1.0, 1.0, 15), zone_x=2.0) == {"right_walkway": True}
+
+
+def test_bad_leave_direction_rejected():
+    with pytest.raises(ValueError):
+        Zone("x", 0, 1, 0, 1, leave_toward="sideways")
+
+
+# --- movie-mode switch --------------------------------------------------
+
+def test_switch_off_clears_and_pauses_detection():
+    tracker = ZoneTracker([LEFT], on_frames=1)
+    walking = points_with((-2.0, 0.0, 1.75))
+    tracker.update(walking, 0.0)
+    assert tracker.set_enabled(False) == {"left_walkway": False}
+    assert tracker.update(walking, 1.0) == {}
+    assert not tracker.states["left_walkway"].occupied
+    tracker.set_enabled(True)
+    assert tracker.update(walking, 2.0) == {"left_walkway": True}
+
+
+def test_switch_discovery_payload():
+    from walkway.mqtt import SWITCH_SET, SWITCH_STATE, switch_discovery
+
+    topic, payload = switch_discovery()
+    cfg = json.loads(payload)
+    assert topic == "homeassistant/switch/theater_walkway_detection/config"
+    assert cfg["command_topic"] == SWITCH_SET and cfg["state_topic"] == SWITCH_STATE
+
+
+def test_switch_restores_last_state_and_obeys_commands():
+    import threading
+    from types import SimpleNamespace
+
+    from walkway.mqtt import SWITCH_SET, SWITCH_STATE, Publisher
+
+    published, seen = [], []
+    pub = Publisher.__new__(Publisher)  # skip the network connection
+    pub._client = SimpleNamespace(publish=lambda t, p, retain=False: published.append((t, p)))
+    pub._enabled, pub._restored, pub.on_switch = True, threading.Event(), seen.append
+    msg = lambda topic, value: SimpleNamespace(topic=topic, payload=value.encode())
+
+    pub._on_message(None, None, msg(SWITCH_STATE, "OFF"))  # retained state from before a restart
+    assert seen == [False] and published == []
+    pub._on_message(None, None, msg(SWITCH_STATE, "ON"))  # our own echo later: ignored
+    assert seen == [False]
+    pub._on_message(None, None, msg(SWITCH_SET, "ON"))  # user flips it in Home Assistant
+    assert seen == [False, True] and published == [(SWITCH_STATE, "ON")]

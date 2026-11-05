@@ -1,4 +1,5 @@
-# Copy to config.yaml and measure your room with a tape measure.
+# Copy to config.yaml. Camera height/tilt/roll are filled in by Auto-level,
+# and zones are easiest to draw on the setup page (python -m walkway config.yaml --setup).
 #
 # Floor plan coordinates in metres, facing the screen:
 #   x = across the room, 0 = the point on the floor directly under the camera,
@@ -10,8 +11,11 @@ camera:
   x: 0.0          # leave 0,0 if zones are measured from the spot under the camera
   y: 0.0
   height: 2.6     # lens height above the floor
-  tilt_deg: 0     # 0 = pointing straight down
+  tilt_deg: 0     # 0 = straight down; ~40-60 for a back-wall mount (Auto-level sets this)
+  roll_deg: 0     # side-to-side lean (Auto-level sets this)
   yaw_deg: 0      # top of the image should face the screen
+  # Back-wall mount: set y to about minus the distance from the back wall to the
+  # middle of the seats (e.g. -4.5) so the map shows the camera behind the seats.
 
 zones:
   - name: left_walkway
@@ -21,7 +25,8 @@ zones:
     y_max: 2.0
     z_min: 1.0     # only things taller than ~1 m count, so seated people don't
     z_max: 2.1
-    min_points: 150
+    min_points: 100
+    leave_toward: back   # only turn on for someone heading out: back | screen | any
   - name: right_walkway
     x_min: 1.6
     x_max: 2.4
@@ -29,11 +34,13 @@ zones:
     y_max: 2.0
     z_min: 1.0
     z_max: 2.1
-    min_points: 150
+    min_points: 100
+    leave_toward: back
 
 tracking:
   on_frames: 3       # consecutive frames before a walkway counts as occupied
   off_seconds: 30    # walkway must be clear this long before it turns off
+  return_off_seconds: 5   # ...or this long if the last person was walking back to a seat
   stride: 4          # use every Nth pixel; raise if the computer is slow
 
 mqtt:

@@ -18,6 +18,7 @@
   .zone { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
   .zone.sel { border-color: var(--accent); }
   .row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  select { background: #0d1014; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
   input { background: #0d1014; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; width: 70px; }
   input.name { width: 150px; font-weight: 600; }
   label { color: var(--quiet); font-size: 12px; }
@@ -32,7 +33,10 @@
 <body>
 <header>
   <h1>Walkway zone setup</h1>
+  <span class="badge" id="det"></span>
+  <span class="count" id="cam"></span>
   <span id="msg"></span>
+  <button id="level" title="Find the floor and work out the camera's height and tilt">Auto-level camera</button>
   <button class="primary" id="save">Save to config</button>
 </header>
 <main>
@@ -45,7 +49,7 @@
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const img = new Image();
-let bounds = null, zones = [], counts = {}, occupied = {}, version = -1, sel = -1, drag = null, dirty = false;
+let camera = {}, loaded = false, lastServerMsg = '', bounds = null, zones = [], counts = {}, occupied = {}, version = -1, sel = -1, drag = null, dirty = false;
 
 // metres <-> canvas pixels (canvas pixel = one heightmap cell)
 const mx = x => (x - bounds.x0) / (bounds.x1 - bounds.x0) * cv.width;
@@ -78,7 +82,7 @@ function draw() {
   for (let x = Math.ceil(bounds.x0); x <= bounds.x1; x++) { ctx.beginPath(); ctx.moveTo(mx(x), 0); ctx.lineTo(mx(x), cv.height); ctx.stroke(); }
   for (let y = Math.ceil(bounds.y0); y <= bounds.y1; y++) { ctx.beginPath(); ctx.moveTo(0, my(y)); ctx.lineTo(cv.width, my(y)); ctx.stroke(); }
   // camera position
-  ctx.fillStyle = '#4aa3ff'; ctx.beginPath(); ctx.arc(mx(0), my(0), 5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#4aa3ff'; ctx.beginPath(); ctx.arc(mx(camera.x || 0), my(camera.y || 0), 8, 0, 7); ctx.fill();
   zones.forEach((z, i) => {
     const q = rect(z), on = occupied[z.name];
     ctx.fillStyle = on ? 'rgba(60,207,110,0.25)' : 'rgba(255,160,0,0.10)';
@@ -86,7 +90,12 @@ function draw() {
     ctx.strokeStyle = on ? '#3ccf6e' : '#ffa000'; ctx.lineWidth = i === sel ? 3 : 1.5;
     ctx.strokeRect(q.l, q.t, q.r - q.l, q.b - q.t);
     ctx.fillStyle = ctx.strokeStyle; ctx.fillRect(q.r - 6, q.b - 6, 12, 12);
-    ctx.font = '600 13px system-ui'; ctx.fillText(z.name, q.l + 6, q.t + 16);
+    ctx.font = '600 22px system-ui'; ctx.fillText(z.name, q.l + 8, q.t + 26);
+    if (z.leave_toward === 'back' || z.leave_toward === 'screen') {  // arrow = the way out
+      const cx = (q.l + q.r) / 2, up = z.leave_toward === 'screen', y0 = up ? q.b - 20 : q.t + 40, y1 = up ? q.t + 40 : q.b - 20;
+      ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cx, y0); ctx.lineTo(cx, y1); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx - 10, y1 + (up ? 14 : -14)); ctx.lineTo(cx, y1); ctx.lineTo(cx + 10, y1 + (up ? 14 : -14)); ctx.stroke();
+    }
   });
   if (drag && drag.mode === 'new') {
     ctx.setLineDash([5, 4]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
@@ -108,9 +117,15 @@ function renderList() {
       <div class="row"><label>From height (m)</label><input data-k="z_min" type="number" step="0.05" value="${z.z_min}">
         <label>to</label><input data-k="z_max" type="number" step="0.05" value="${z.z_max}"></div>
       <div class="row"><label>Points needed</label><input data-k="min_points" type="number" step="10" value="${z.min_points}">
-        <label>Size</label><span class="count">${r2(z.x_max - z.x_min)} × ${r2(z.y_max - z.y_min)} m</span></div>`;
+        <label>Size</label><span class="count">${r2(z.x_max - z.x_min)} × ${r2(z.y_max - z.y_min)} m</span></div>
+      <div class="row"><label>Turn on when someone walks</label>
+        <select data-k="leave_toward">
+          <option value="any"${z.leave_toward === 'any' ? ' selected' : ''}>either way</option>
+          <option value="back"${z.leave_toward === 'back' ? ' selected' : ''}>toward the back (leaving)</option>
+          <option value="screen"${z.leave_toward === 'screen' ? ' selected' : ''}>toward the screen (leaving)</option>
+        </select></div>`;
     d.onclick = () => { if (sel !== i) { sel = i; renderList(); draw(); } };
-    d.querySelectorAll('input').forEach(inp => inp.onchange = () => {
+    d.querySelectorAll('input, select').forEach(inp => inp.onchange = () => {
       const k = inp.dataset.k;
       z[k] = k === 'name' ? inp.value.trim().replace(/\s+/g, '_') : Number(inp.value);
       changed();
@@ -140,6 +155,11 @@ async function send(save) {
   if (save) { dirty = false; msg('Saved to config'); }
 }
 function msg(t) { document.getElementById('msg').textContent = t; }
+document.getElementById('level').onclick = async () => {
+  if (!confirm('Auto-level needs a clear view of the floor. Move anything big out of the way, then press OK.')) return;
+  await fetch('/calibrate', { method: 'POST' });
+  bounds = null;  // the view is rebuilt once the new camera angle is applied
+};
 document.getElementById('save').onclick = () => send(true);
 
 cv.addEventListener('pointerdown', e => {
@@ -171,7 +191,7 @@ cv.addEventListener('pointerup', () => {
       const guess = ['left_walkway', 'right_walkway'].find(n => !taken.has(n)) || `zone_${zones.length + 1}`;
       const name = (prompt('Name for this zone', guess) || guess).trim().replace(/\s+/g, '_');
       zones.push({ name, x_min: xm(Math.min(a.x, b.x)), x_max: xm(Math.max(a.x, b.x)),
-                   y_min: ym(Math.max(a.y, b.y)), y_max: ym(Math.min(a.y, b.y)), z_min: 1.0, z_max: 2.1, min_points: 150 });
+                   y_min: ym(Math.max(a.y, b.y)), y_max: ym(Math.min(a.y, b.y)), z_min: 1.0, z_max: 2.1, min_points: 100, leave_toward: 'any' });
       sel = zones.length - 1;
     }
   }
@@ -183,9 +203,18 @@ cv.addEventListener('pointerup', () => {
 async function poll() {
   try {
     const s = await (await fetch('/state.json')).json();
-    if (s.bounds && !bounds) {
+    const det = document.getElementById('det');
+    det.textContent = s.enabled ? 'Detection on' : 'Detection off (movie mode switch)';
+    det.className = 'badge' + (s.enabled ? ' on' : '');
+    if (s.camera) camera = s.camera;
+    if (s.camera && s.camera.height !== undefined)
+      document.getElementById('cam').textContent = `Camera ${s.camera.height} m high, tilt ${s.camera.tilt_deg}°, roll ${s.camera.roll_deg}°`;
+    if (s.message && s.message !== lastServerMsg) { lastServerMsg = s.message; msg(s.message); }
+    if (s.bounds && (!bounds || JSON.stringify(s.bounds) !== JSON.stringify(bounds))) {
+      const first = !loaded; loaded = true;
       bounds = s.bounds; cv.width = bounds.w * 2; cv.height = bounds.h * 2;
-      zones = s.zones; renderList();
+      if (first) { zones = s.zones; }
+      renderList();
     }
     counts = s.counts; occupied = s.occupied; updateLive();
     if (s.version !== version) { version = s.version; img.src = '/map.png?v=' + version; }

@@ -35,8 +35,19 @@ class Bounds:
 
     @classmethod
     def around(cls, points: np.ndarray, margin: float = 0.2) -> "Bounds":
-        xs, ys = points[:, 0], points[:, 1]
-        return cls(float(xs.min()) - margin, float(xs.max()) + margin, float(ys.min()) - margin, float(ys.max()) + margin)
+        """Floor-plan area the camera sees. Ignores walls/ceiling and stray far points,
+        which matters for a back-wall camera that also sees the screen wall."""
+        low = points[points[:, 2] < 2.3]
+        if len(low) < 100:
+            low = points
+        xs, ys = low[:, 0], low[:, 1]
+        x0, x1 = np.percentile(xs, [0.5, 99.5])
+        y0, y1 = np.percentile(ys, [0.5, 99.5])
+        # A wide lens can see floor far past a doorway; keep the map room-sized.
+        mx, my = float(np.median(xs)), float(np.median(ys))
+        x0, x1 = max(x0, mx - 6), min(x1, mx + 6)
+        y0, y1 = max(y0, my - 7), min(y1, my + 7)
+        return cls(float(x0) - margin, float(x1) + margin, float(y0) - margin, float(y1) + margin)
 
     def as_dict(self) -> dict:
         return {"x0": self.x0, "x1": self.x1, "y0": self.y0, "y1": self.y1, "w": self.w, "h": self.h}
@@ -74,7 +85,8 @@ def zone_from_json(d: dict) -> Zone:
         y_max=float(max(d["y_min"], d["y_max"])),
         z_min=float(d.get("z_min", 1.0)),
         z_max=float(d.get("z_max", 2.1)),
-        min_points=int(d.get("min_points", 150)),
+        min_points=int(d.get("min_points", 100)),
+        leave_toward=str(d.get("leave_toward", "any")),
     )
     return z
 
@@ -82,11 +94,21 @@ def zone_from_json(d: dict) -> Zone:
 class SetupServer:
     """Holds the latest frame and serves the setup page in a background thread."""
 
-    def __init__(self, tracker: ZoneTracker, config_path: str | Path, port: int = 8099, on_zones_changed=None):
+    def __init__(
+        self,
+        tracker: ZoneTracker,
+        config_path: str | Path,
+        port: int = 8099,
+        on_zones_changed=None,
+        lock: threading.RLock | None = None,
+    ):
         self.tracker = tracker
         self.on_zones_changed = on_zones_changed  # called with (old_names, new_names)
         self.config_path = config_path
-        self.lock = threading.Lock()
+        self.lock = lock or threading.RLock()  # shared with the main loop
+        self.calibrate_requested = False
+        self.message = ""
+        self.camera: dict = {}
         self.bounds: Bounds | None = None
         self.png = b""
         self.counts: dict[str, int] = {}
@@ -117,6 +139,11 @@ class SetupServer:
                     self._send(404, b"not found", "text/plain")
 
             def do_POST(self):
+                if self.path == "/calibrate":
+                    with server.lock:
+                        server.calibrate_requested = True
+                        server.message = "Auto-leveling..."
+                    return self._send(200, json.dumps(server.state()).encode(), "application/json")
                 if self.path != "/zones":
                     return self._send(404, b"not found", "text/plain")
                 try:
@@ -144,11 +171,11 @@ class SetupServer:
                 save_zones(self.config_path, zones)
                 log.info("saved %d zones to %s", len(zones), self.config_path)
 
-    def update(self, points: np.ndarray, with_image: bool) -> None:
+    def update(self, points: np.ndarray, with_image: bool, weights: np.ndarray | None = None) -> None:
         with self.lock:
             if self.bounds is None:
                 self.bounds = Bounds.around(points)
-            self.counts = self.tracker.counts(points)
+            self.counts = self.tracker.counts(points, weights)
             if with_image:
                 self.png = height_png(points, self.bounds)
                 self.version += 1
@@ -161,6 +188,9 @@ class SetupServer:
                 "zones": [asdict(z) for z in self.tracker.zones],
                 "counts": self.counts,
                 "occupied": {n: s.occupied for n, s in self.tracker.states.items()},
+                "enabled": self.tracker.enabled,
+                "camera": self.camera,
+                "message": self.message,
             }
 
     def close(self) -> None:
