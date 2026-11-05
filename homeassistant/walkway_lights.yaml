@@ -1,0 +1,46 @@
+# Paste into Home Assistant (Settings > Automations > Create > Edit in YAML),
+# one automation per side. Replace light.left_walkway / light.right_walkway
+# with your own light entities.
+#
+# The tracker turns its sensor off only after the walkway has been clear for
+# 30 seconds (off_seconds in config.yaml), so the lights stay on until the
+# person is well out of the way.
+
+- alias: Theater - left walkway light
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.theater_walkway_left_walkway
+  # Optional: only while the theater is dark / a movie is playing.
+  # conditions:
+  #   - condition: state
+  #     entity_id: media_player.theater
+  #     state: playing
+  actions:
+    - choose:
+        - conditions: "{{ trigger.to_state.state == 'on' }}"
+          sequence:
+            - action: light.turn_on
+              target: { entity_id: light.left_walkway }
+              data: { brightness_pct: 5, transition: 1 }
+      default:
+        - action: light.turn_off
+          target: { entity_id: light.left_walkway }
+          data: { transition: 3 }
+
+- alias: Theater - right walkway light
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.theater_walkway_right_walkway
+  actions:
+    - choose:
+        - conditions: "{{ trigger.to_state.state == 'on' }}"
+          sequence:
+            - action: light.turn_on
+              target: { entity_id: light.right_walkway }
+              data: { brightness_pct: 5, transition: 1 }
+      default:
+        - action: light.turn_off
+          target: { entity_id: light.right_walkway }
+          data: { transition: 3 }

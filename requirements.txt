@@ -1,0 +1,6 @@
+numpy>=1.24
+PyYAML>=6
+paho-mqtt>=2.0
+depthai>=2.24,<3   # OAK camera SDK; not needed for --sim or tests
+Pillow>=10         # only for --heightmap
+pytest>=8          # tests

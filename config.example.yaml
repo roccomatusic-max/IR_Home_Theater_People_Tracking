@@ -1,0 +1,43 @@
+# Copy to config.yaml and measure your room with a tape measure.
+#
+# Floor plan coordinates in metres, facing the screen:
+#   x = across the room, 0 = the point on the floor directly under the camera,
+#       negative = toward the LEFT walkway, positive = toward the RIGHT walkway
+#   y = along the room, positive = toward the screen
+#   z = height above the floor
+
+camera:
+  x: 0.0          # leave 0,0 if zones are measured from the spot under the camera
+  y: 0.0
+  height: 2.6     # lens height above the floor
+  tilt_deg: 0     # 0 = pointing straight down
+  yaw_deg: 0      # top of the image should face the screen
+
+zones:
+  - name: left_walkway
+    x_min: -2.4
+    x_max: -1.6
+    y_min: -2.0
+    y_max: 2.0
+    z_min: 1.0     # only things taller than ~1 m count, so seated people don't
+    z_max: 2.1
+    min_points: 150
+  - name: right_walkway
+    x_min: 1.6
+    x_max: 2.4
+    y_min: -2.0
+    y_max: 2.0
+    z_min: 1.0
+    z_max: 2.1
+    min_points: 150
+
+tracking:
+  on_frames: 3       # consecutive frames before a walkway counts as occupied
+  off_seconds: 30    # walkway must be clear this long before it turns off
+  stride: 4          # use every Nth pixel; raise if the computer is slow
+
+mqtt:
+  host: homeassistant.local
+  port: 1883
+  username: walkway
+  password: change-me
